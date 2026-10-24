@@ -1,0 +1,26 @@
+# User save/game backups and settings stay out of the repository.
+backups/
+data/settings.json
+settings.json
+
+# Build output, caches, virtual environments
+__pycache__/
+build/
+dist/
+.venv/
+
+# Python byproducts
+*.pyc
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Temporary files created while writing
+*.new
+
+# Editor, OS and tool settings
+.vscode/
+.idea/
+.claude/
+.DS_Store
+Thumbs.db

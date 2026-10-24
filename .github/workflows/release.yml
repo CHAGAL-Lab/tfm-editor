@@ -1,0 +1,144 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check tag is on the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$DEFAULT_BRANCH"; then
+            echo "Tag $GITHUB_REF_NAME is not on $DEFAULT_BRANCH. Merge to $DEFAULT_BRANCH and tag there."
+            exit 1
+          fi
+
+      - name: Check tag matches package version
+        run: |
+          version=""
+          if [ -f pyproject.toml ]; then
+            version=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          elif [ -f package.json ]; then
+            version=$(jq -r .version package.json)
+          elif [ -f Cargo.toml ]; then
+            version=$(grep -m1 -E '^version *= *"' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          elif [ -f gradle.properties ] && grep -q '^VERSION_NAME=' gradle.properties; then
+            version=$(sed -n 's/^VERSION_NAME=//p' gradle.properties | tr -d '\r')
+          fi
+          if [ -z "$version" ]; then
+            echo "No version file found, skipping"
+            exit 0
+          fi
+          case "$GITHUB_REF_NAME" in
+            *-*) echo "Pre-release tag, skipping version comparison"; exit 0 ;;
+          esac
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package version v$version"
+            exit 1
+          fi
+
+  # Build steps are per language. Each OS builds its own archive; the release job collects them in dist/.
+  build:
+    needs: check
+    strategy:
+      fail-fast: true
+      matrix:
+        # ubuntu-22.04: build on an older glibc so the Linux binary runs on more distributions.
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Linux GUI libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk xvfb
+
+      - name: Install build tools
+        run: python -m pip install pyinstaller==6.22.3 pyflakes
+
+      - name: Lint
+        run: python -m pyflakes run_gui.py save_editor
+
+      - name: Build executable
+        run: pyinstaller packaging/tfm-editor.spec --noconfirm --clean
+
+      - name: Smoke test (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a dist/tfm-editor --selftest
+
+      # The Windows build has no console, so read the exit code instead of the output.
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\tfm-editor.exe -ArgumentList '--selftest' -Wait -PassThru
+          exit $p.ExitCode
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          name="${GITHUB_REPOSITORY#*/}-${GITHUB_REF_NAME}-linux-x86_64"
+          mkdir -p "release/$name"
+          cp dist/tfm-editor README.md LICENSE "release/$name/"
+          mkdir -p out
+          tar -czf "out/$name.tar.gz" -C release "$name"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "$($env:GITHUB_REPOSITORY.Split('/')[1])-$($env:GITHUB_REF_NAME)-windows-x86_64"
+          New-Item -ItemType Directory -Force -Path "release\$name", out | Out-Null
+          Copy-Item dist\tfm-editor.exe, README.md, LICENSE "release\$name\"
+          Compress-Archive -Path "release\$name" -DestinationPath "out\$name.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ runner.os }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=()
+          case "$GITHUB_REF_NAME" in
+            *-*) args+=(--prerelease) ;;
+          esac
+          files=()
+          if compgen -G "dist/*" > /dev/null; then
+            files=(dist/*)
+          fi
+          gh release create "$GITHUB_REF_NAME" "${files[@]}" "${args[@]}" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag

@@ -1,0 +1,13 @@
+[project]
+name = "tfm-editor"
+version = "1.0.0"
+description = "Teamfight Manager save and game file (growth curve, star count) editor"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+tfm-editor = "save_editor.cli:main"
+
+[tool.setuptools]
+packages = ["save_editor"]
